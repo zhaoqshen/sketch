@@ -4,8 +4,6 @@ Kafka的架构设计比较简单，主要由生产者、消费者和Kafka集群�
 
 RocketMQ的架构设计比较复杂，主要由Namesrv、Broker和Producer/Consumer三个角色组成。Namesrv主要负责服务注册和发现，Broker节点负责存储和传输消息，Producer和Consumer分别将消息发送到和从Broker节点中获取消息。RocketMQ也是基于Topic和Partition（Queen）的数据模型，但它采用了一种主从复制的机制，确保了数据的高可用性和容错性
 
-
-
 Kafka和RocketMQ都是高可靠性的消息系统，但是它们的可靠性也有所不同。
 
 在数据可靠性方面，Kafka表现更加出色。Kafka采用了多副本机制，每个Partition都有多个副本，当某个Broker节点失效时，可以通过其他副本来保证数据的可用性。而RocketMQ采用的是主从复制机制，当主节点失效时，需要进行主节点选举才能保证数据的可用性，这可能会导致一定的延迟。
