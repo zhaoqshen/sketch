@@ -222,3 +222,101 @@ SyncGroupResponse中。这样所有成员都知道自己应该消费哪个分区
 
 ## Rocket
 
+根据读取操作的情况分为两种情况：
+
+`DefaultMQPushConsumer`:由系统控制读取情况。系统收到消息后自动调用处理函数来处理消息，自动保存 Offset，而且加 入新的 DefaultMQPushConsumer后会自动做负载均衡。
+
+DefaultMQPushConsumer需要 设 置三 个 参数 : 一 是这个 Consumer 的 GroupName，二是 NameServer 的地址和端 口号，三是 Topic 的名称。
+
+Consumer的 GroupName用于把多个 Consumer组织到一起， 提高并发 处理能力， GroupName需要和消息模式 (MessageModel)配合使用。
+
+NameServer 的地址和端口 号，可以填写多个 ，用分号隔开
+
+Topic名称用来标识消息类型， 需要提前创建。 如果不需要消费某 个 Topic 下的所有消息，可以通过指定消息的 Tag 进行消息过滤，
+
+RocketMQ支持两种消息模式: Clustering和Broadcasting。
+
++ 在 Clustering模式下，同一个 ConsumerGroup(GroupName相同) 里的每 个 Consumer 只消费所订阅消 息 的一部分 内容， 同一个 ConsumerGroup 里所有的 Consumer消费的内容合起来才是所订阅 Topic 内容的整体， 从而达到负载均衡的目的 
++ 在 Broadcasting模式下，同一个 ConsumerGroup里的每个 Consumer都 能消费到所订阅 Topic 的全部消息，也就是一个消息会被多次分发，被 多个 Consumer消费。
+
+DefaultMQPushConsumer的消费流程
+
+DefaultMQPushConsumer主要功能实现在DefaultMQPushConsumerlmpl 类中，消息的处理逻辑是在 pullMessage 这个函数里的 PullCallBack 中 。 在 PullCallBack 函数里有个 switch 语句，根据从 Broker 返回的消息类型做相应的 处理。
+
+“ PushConsumer”中使用“ PullRequest通过“长轮询”方式达到 Push效果的方法，长轮询方式既有 Pull 的优点，又兼具 Push方式的实时性 Push方式是 Server端接收到消息后，主动把消息推送给 Client端，实时 性高。
+
+`DefaultMQPullConsumer`：由使用者自己控制。Pull方式是 Client端循环地从 Server端拉取消息，主动权在 Client手里， 自己拉取到一定量消息后，处理妥当了再接着取。requestHeader.setSuspendTimeoutMillis (brokerSus- pendMaxTimeMillis)，作用是设置Broker最长阻塞时间，默认设置是 15秒，注 意是 Broker在没有新消息的时候才阻塞，有消息会立刻返回 。服务端接到新消息 请求后， 如果队列 里没有 新消息，并不急于返回，通过一个循环不断查看状态，每次 waitForRunning 一段时间 (默认是5秒)， 然后后再Checka 默认情况下当 Broker一直没 有新 消息， 第三次 Check 的时候， 等待时 间超过 Request里面的 Broker­ SuspendMaxTimeMi11is， 就返回空结果。Broker 端 HOLD 住客户端过来的请求一小段时间，在这个时间内有新 消息到达，就利用现有的连接 立 刻返回消息给 Consumer。Broker 即使有大 量 消息积 压 ，也不会主动推 送给 Consumer 。长轮询方式的局限性，是在 HOLD 住 Consumer 请求的时候需要占用资源， 它适合用在消息队列这种客户端连接数可控的场 景 中 。
+
+DefaultMQPushConsumer 的流量控制
+
+RocketMQ定义了一个快照类 ProcessQueue每个 Message Queue 都会有个对应的 ProcessQueue 对象，保存了这个 Message Queue 消息处理状态的快照 ProcessQueue对象里主要的内容是一个 TreeMap 和一个读写锁。 TreeMap 里以 Message Queue 的 Offset作为 Key，以消息内容的引用为 Value，保存了 所有从 MessageQueue 获取到，但是还未被处理的消息; 读写 锁控制着多个线程对 TreeMap 对象的并发访 问。PushConsumer会判断获取但还未处理的消息个数、消 息总大小、 Offset 的跨度，任何一个值超过设定的大小就隔一段时间再拉取消 息，从而达到流量控制的目的 。 此外 ProcessQueue 还可以辅助实现顺序消费的 逻辑。
+
+`DefaultMQPullConsumer`
+
+一 个 Topic 包括多个 Message Queue，如果这个 Consumer 需要获取 Topic 下所有的消息，就 要遍历多有的 Message Queue。
+
+维护 Offsetstore
+
+从一个 Message Queue 里拉取消息的时候，要传人 Offset参数( long类型 的值)，随着不断读取消息 ， Offset会不断增长 。 这个时候由用户负责把 Offset 存储下来，根据具体情况可以存到内存里、写到磁盘或者数据库里等 
+
+拉取消息的请求发出后，会返回: FOUND、 NO MATCHED MSG、 NO NEW MSG、 OFFSET ILLEGAL 四种状态，需要根据每个状态做不同的处理 。比较重要的两个状态是 FOUNT 和 NO NEW MSG ，分别表示获取到消息和没 有新的消息 。
+
+Consumer 的启动、关闭流程
+
++ PullConsumer，使用者主动权很高，可以根据实际需要暂停、停止、启动消费过程。需要注意的是 Offset 的保存，要在程序的异常处理部分增加把 Offset 写人磁盘方 面的处理，记准了每个 Message Queue 的 Offset，才能保证消息消 费 的准确性 。
+
++ DefaultMQPushConsumer 的退出， 要调用 shutdown() 函数， 以便 释放资 源、保存 Offset 等 。 这个调用要加到 Consumer 所在应用的退出逻辑中 
+
+PushConsumer在启动的时候 ，会做各种配置检查，然后连接 NameServer 获取 Topic 信息，启动时如果遇到异常，比如无法连接 NameServer，程序仍然 可以正常启动不报错(日 志里有 WARN 信息 )。 在单机环境下可以测试这种情 况，启动 DefaultMQPushConsumer 时故 意 把 NameServer 地址填错，程序仍然 可以正常启动，但是不会收到消息 。 RocketMQ 集群可以有多 个 NameServer、 Broker，某个机器出异常后整体服务依然可用。 所以 DefaultMQPushConsumer 被设计成当发现某个连接异常时不立刻退出，而是不断尝试重新连接。如果需要在 DefaultMQPushConsumer启动的时候，及时暴露配置问题，该 如何操作呢? 可以在 Consumer.start()语句后调用: Consumer.fetchSubscribeMe- ssageQueues(”TopicName”)，这 时如果配 置信息写得不准确，或者当 前服务不可 用，这个语句会报 MQC!ientException 异 常 。
+
+
+
+延迟消息的使用方法是在创建 Message对象时，调用 setDelayTimeLevel ( int level) 方法设置延迟时间， 然后再把这个消息发送 出去。
+
+一个 Topic会有多个 Message Queue，如果使用 Producer的默认配置，这 个 Producer 会轮流向各个 Message Queue 发 送 消息 。 Consumer 在消费消息的 时候，会根据负载均衡策略，消费被分配到的 Message Queue，如果不经过特 定的设置，某条消息被发往 l哪个 Message Queue，被哪个 Consumer 消费是未 知的。
+
+把同 一 类型 的消息都发 往 相同的 Message Queue， 该怎 么办呢 ? 可以用 Message­ QueueSelector，
+
+RocketMQ 采用两阶段提交 的方式实现事务消息， RocketMQ 依赖将数据顺序写到磁盘这个 特征来提高性能，却需要更改第一阶段消息的状态，这样会造成磁盘 Catch 的脏页过 多， 降低系统的性能 。
+
+
+
+首先来明确一下 Offset 的含义， RocketMQ 中， 一 种类型的消息会放到 一 个 Topic 里，为了能够并行， 一 般一个 Topic 会有多个 Message Queue (也可以 设置成一个)， Offset是指某个 Topic下的一条消息在某个 Message Queue里的 位置，通过 Offset的值可以定位到这条消息，或者指示 Consumer从这条消息 开始向后继续处理 。
+
+Offset 的类结构，主要分为本地文件类型和 Broker代存 的类型两种 。 对于 DefaultMQPushConsurner来说，默认是 CLUSTERING 模 式，也就是同一个 Consumer group 里的多个消费者每人消费一部分，各自收到 的消息内容不一样 。 这种情况下，由 Broker 端存储和控制 Offset 的值，使用 RemoteBrokerOffsetStore 结构 。
+
+DefaultMQPushConsumer里的 BROADCASTING模式下，每个 Consumer 都收到这个 Topic 的全部消息，各个 Consumer 间相互没有干扰， RocketMQ 使 用 LocalfileOffsetStore，把 Offset存到本地 。
+
+如果 PullConsumer，我们就要自己处理 OffsetStore了 `LocalFileOffsetStore`
+
+DefaultMQPushConsumer类里有个函数用来设置从哪儿开始消费 消 息: 指定offset 时间 时间戳格式是精确到秒的 。
+
+注意设置读取位置不是每次都有效，它的优先级默认在 Offset Store后面 ， 比如 在 DefaultMQPushConsumer 的 BROADCASTING 方式 下 ，默 认 是 从 Broker 里读取某个 Topic 对 应 ConsumerGroup 的 Offset， 当读 取不到 Offset 的时候， ConsumeFromWhere 的设置才生效 。 大部分情况下这个设置在 Consumer Group初次启动时有效。 如果 Consumer正常运行后被停止， 然后再启动， 会 接着上次的 Offset开始消费， ConsumeFromWhere 的设置元效。
+
+
+
+NameServer是整个消息队列中 的状态服务器，集群的各个组件通过它来了 解全局的信息 。 同时午，各个角色的机器都要定期 向 NameServer上报自己的状 态，超 时不上报的 话， NameServer 会认为 某个机器出故障不可用了，其他的组 件会把这个机器从可用列表里移除 。
+
+NameServer本身是无状态的，也就 是说 NameServer 中的 Broker、 Topic 等状态信息不会持久存储，都是由各个角色 定时上报并存储到内存中的
+
+RocketMQ消息的存储是由ConsumeQueue和CommitLog配合完成的， 消息真正的物理存储文件是 CommitLog.
+
+ConsumeQueue 是消息的逻辑队 列，类似数据库的索引文件，存储的是指向物理存储的地址 。 每个 Topic 下 的每个 Message Queue都有一个对应的 ConsumeQueue 文件 。 文件地址在 ${$storeRoot}\consumequeue\${topicName}\${queueld}\${fileName}
+
+ConsumeQueue 组成
+
+CommitLog_Offset  CommitLog 中的物理便宜量
+
+Size 消息大小
+
+message tagHashcode 消息标签的tag 哈希值。
+
+CommitLog 以物理文件的方式存放，每台 Broker上的 CommitLog被本 机器所有 ConsumeQueue 共 享
+
+在 CommitLog 中，一个消息的存储长度是不固定的， RocketMQ 采取一些机制，尽量 向 CommitLog 中顺序写 ，但是随机读 。 ConsumeQueue 的 内容也会被写到磁盘里作持久存储 。
+
+存储机制这样设计有以下几个好处:
+
++ CommitLog 顺序 写 ，可以大大提 高写人效率 
++ 虽然是随机读，但是利用操作系统的 pagecache 机制，可以批量地从磁 盘读取，作为 cache存到内存中，加速后续的读取速度
++ 为了保证完全的顺序写，需要 ConsumeQueue 这个中间结构 ，因为 ConsumeQuue 里只存偏移量信息，所以尺寸是有限的，在实际情况中，大部 分的 ConsumeQueue 能够被全部读人内存，所以这个中间结构的操作速度很快， 可以认为是内存读取的速度 。 此外为了保证 CommitLog 和 ConsumeQueue 的一 致性， CommitLog 里存储了 Consume Queues、 Message  key、 Tag 等所有信息， 即使 ConsumeQueue 丢失，也可以通过 commitLog 完全恢复出来 。
